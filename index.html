@@ -5,245 +5,186 @@
   <title>test</title>
   <style>
     body { background: #000; color: #fff; font-family: sans-serif; text-align: center; }
-    canvas { background: #111; border: 2px solid white; margin-top: 20px; }
+    canvas { background: #111; border: 2px solid #fff; margin-top: 1rem; }
   </style>
 </head>
 <body>
   <h1>Unlimited Tetris</h1>
   <canvas id="tetris" width="200" height="400"></canvas>
-  <p>Controls: J = left, L = right, K = soft drop, I = rotate cw, Z = ccw, A = 180°, Shift = Hold, Space = Hard Drop</p>
+  <p>Controls: J=←, L=→, K=soft, I=rot↻, Z=↺, A=180°, Shift=hold, Space=hard</p>
   <script>
-  window.addEventListener('DOMContentLoaded', () => {
-    const canvas = document.getElementById('tetris');
-    const context = canvas.getContext('2d');
-    context.scale(20, 20);
+    window.addEventListener('DOMContentLoaded', () => {
+      const canvas = document.getElementById('tetris');
+      const ctx = canvas.getContext('2d');
+      ctx.scale(20, 20);
 
-    // Handling settings (ms)
-    const DAS = 130;    // Delayed Auto Shift delay
-    const ARR = 50;     // Auto Repeat Rate interval
-    const DCD = 50;     // DAS Cut Delay on direction change
-    const SDF = 20;     // Soft Drop Factor (multiplier)
+      // Config
+      const COLS = 10, ROWS = 20;
+      const DAS = 130, ARR = 50, DCD = 50, SDF = 20, BASE = 1000;
 
-    const COLS = 10, ROWS = 20;
-    const arena = createMatrix(COLS, ROWS);
-    let dropCounter = 0, lastTime = 0;
-    const baseDropInterval = 1000;
+      // State
+      let arena = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+      let dropCounter = 0, lastTime = 0;
+      let hold = null, canHold = true;
+      let input = { left: false, right: false, soft: false, dir: 0, dcd: 0, tLeft: 0, tRight: 0 };
 
-    let holdPieceMatrix = null, canHold = true;
-    const player = { pos:{x:0,y:0}, matrix:null, type:null, lastRotate:false };
+      const player = { pos: { x: 0, y: 0 }, mat: null, type: null, rotLast: false };
 
-    // Input state for handling
-    const inputState = {
-      left: { held:false, timer:0, arrTimer:0 },
-      right:{ held:false, timer:0, arrTimer:0 },
-      soft: { held:false }
-    };
-    let dirState = { last:0, dcdTimer:0 };
+      // Pieces & kicks
+      const pieces = {
+        T: [[0,1,0],[1,1,1],[0,0,0]],
+        J: [[2,0,0],[2,2,2],[0,0,0]],
+        L: [[0,0,3],[3,3,3],[0,0,0]],
+        O: [[4,4],[4,4]],
+        S: [[0,5,5],[5,5,0],[0,0,0]],
+        Z: [[6,6,0],[0,6,6],[0,0,0]],
+        I: [[0,0,0,0],[7,7,7,7],[0,0,0,0],[0,0,0,0]]
+      };
 
-    const pieces = {
-      'T': [[0,1,0],[1,1,1],[0,0,0]],
-      'J': [[2,0,0],[2,2,2],[0,0,0]],
-      'L': [[0,0,3],[3,3,3],[0,0,0]],
-      'O': [[4,4],[4,4]],
-      'S': [[0,5,5],[5,5,0],[0,0,0]],
-      'Z': [[6,6,0],[0,6,6],[0,0,0]],
-      'I': [[0,0,0,0],[7,7,7,7],[0,0,0,0],[0,0,0,0]]
-    };
+      const kicks = {
+        CW: [[0,0],[-1,0],[-1,1],[0,-2],[-1,-2]],
+        CCW: [[0,0],[1,0],[1,1],[0,-2],[1,-2]]
+      };
 
-    const kickData = {
-      'CW': [[0,0],[-1,0],[-1,1],[0,-2],[-1,-2]],
-      'CCW': [[0,0],[1,0],[1,1],[0,-2],[1,-2]]
-    };
+      const randMat = () => {
+        const keys = Object.keys(pieces);
+        player.type = keys[Math.random() * keys.length | 0];
+        return pieces[player.type].map(r => r.slice());
+      };
 
-    function createMatrix(w,h){ const m=[]; while(h--) m.push(new Array(w).fill(0)); return m; }
-    function createPiece(){
-      const keys = Object.keys(pieces);
-      const type = keys[Math.floor(Math.random()*keys.length)]; player.type=type;
-      return pieces[type].map(r=>r.slice());
-    }
+      const reset = () => {
+        player.mat = randMat();
+        player.pos.y = 0;
+        player.pos.x = (COLS - player.mat[0].length) / 2 | 0;
+        canHold = true;
+        player.rotLast = false;
+      };
 
-    function drawMatrix(m,o,ghost=false){
-      m.forEach((row,y)=> row.forEach((v,x)=>{
-        if(v){
-          context.fillStyle = ghost? 'rgba(255,255,255,0.2)' : '#6cf';
-          context.fillRect(x+o.x,y+o.y,1,1);
-        }
-      }));
-    }
+      const collide = (mat, p) => {
+        for (let y = 0; y < p.mat.length; ++y)
+          for (let x = 0; x < p.mat[y].length; ++x)
+            if (p.mat[y][x] && (arena[y + p.pos.y]?.[x + p.pos.x]))
+              return true;
+        return false;
+      };
 
-    function drawGhost(){
-      const ghost={ pos:{x:player.pos.x,y:player.pos.y}, matrix:JSON.parse(JSON.stringify(player.matrix)) };
-      while(!collide(arena,ghost)) ghost.pos.y++;
-      ghost.pos.y--;
-      drawMatrix(ghost.matrix,ghost.pos,true);
-    }
-
-    function draw(){
-      context.fillStyle='#000'; context.fillRect(0,0,canvas.width,canvas.height);
-      drawMatrix(arena,{x:0,y:0});
-      drawGhost();
-      drawMatrix(player.matrix,player.pos);
-    }
-
-    function collide(arena,p){
-      const [m,o]=[p.matrix,p.pos];
-      for(let y=0;y<m.length;++y){
-        for(let x=0;x<m[y].length;++x){
-          if(m[y][x] && (arena[y+o.y] && arena[y+o.y][x+o.x])) return true;
-        }
-      }
-      return false;
-    }
-
-    function merge(arena,p){
-      p.matrix.forEach((row,y)=> row.forEach((v,x)=>{
-        if(v) arena[p.pos.y+y][p.pos.x+x] = v;
-      }));
-    }
-
-    function arenaSweep(){
-      outer: for(let y=ROWS-1; y>=0; --y){
-        for(let x=0; x<COLS; ++x){
-          if(!arena[y][x]) continue outer;
-        }
-        const row = arena.splice(y,1)[0].fill(0);
-        arena.unshift(row);
-        ++y;
-      }
-    }
-
-    function playerReset(){
-      player.matrix = createPiece();
-      player.pos.y = 0;
-      player.pos.x = (COLS/2|0) - (player.matrix[0].length/2|0);
-      canHold = true;
-      player.lastRotate = false;
-    }
-
-    function playerDrop(){
-      player.pos.y++;
-      if(collide(arena,player)){
-        player.pos.y--;
-        const isT = player.type === 'T' && player.lastRotate;
-        merge(arena,player);
-        if(isT && detectTSpin()) console.log('T-SPIN!');
-        arenaSweep();
-        playerReset();
-      }
-      dropCounter = 0;
-    }
-
-    function hardDrop(){
-      while(!collide(arena,player)) player.pos.y++;
-      player.pos.y--;
-      merge(arena,player);
-      arenaSweep();
-      playerReset();
-    }
-
-    function detectTSpin(){
-      const o = player.pos;
-      const corners = [[0,0],[2,0],[0,2],[2,2]];
-      let count = 0;
-      corners.forEach(([cx,cy])=>{
-        const x = o.x + cx;
-        const y = o.y + cy;
-        if(x < 0 || x >= COLS || y < 0 || y >= ROWS || arena[y][x]) count++;
-      });
-      return count >= 3;
-    }
-
-    function playerMove(dir){
-      player.pos.x += dir;
-      if(collide(arena,player)) player.pos.x -= dir;
-    }
-
-    function processHorizontal(delta){
-      ['left','right'].forEach(side => {
-        const st = inputState[side];
-        const dir = side === 'left' ? -1 : 1;
-        if(st.held && dirState.dcdTimer <= 0){
-          st.timer += delta;
-          if(st.timer > DAS){
-            st.arrTimer += delta;
-            if(st.arrTimer > ARR){ playerMove(dir); st.arrTimer -= ARR; }
+      const merge = p => p.mat.forEach((r,y) => r.forEach((v,x) => v && (arena[p.pos.y+y][p.pos.x+x] = v)));
+      const sweep = () => {
+        outer: for (let y = ROWS - 1; y >= 0; --y) {
+          if (arena[y].every(v => v > 0)) {
+            arena.splice(y,1);
+            arena.unshift(Array(COLS).fill(0));
+            ++y;
           }
         }
-      });
-      if(dirState.dcdTimer > 0) dirState.dcdTimer -= delta;
-    }
+      };
 
-    function rotate(m,dir){
-      for(let y=0; y<m.length; ++y){
-        for(let x=0; x<y; ++x){
-          [m[x][y],m[y][x]] = [m[y][x],m[x][y]];
+      const rotate = (m, dir) => {
+        for (let y = 0; y < m.length; ++y)
+          for (let x = 0; x < y; ++x)
+            [m[x][y], m[y][x]] = [m[y][x], m[x][y]];
+        dir > 0 ? m.forEach(r => r.reverse()) : m.reverse();
+      };
+
+      const playerRotate = dir => {
+        const old = player.mat.map(r => r.slice()), x0 = player.pos.x;
+        rotate(player.mat, dir);
+        const kc = dir > 0 ? kicks.CW : kicks.CCW;
+        for (const [dx,dy] of kc) {
+          player.pos.x = x0 + dx;
+          player.pos.y += dy;
+          if (!collide(arena, player)) { player.rotLast = true; return; }
         }
-      }
-      if(dir > 0) m.forEach(r => r.reverse()); else m.reverse();
-    }
+        player.mat = old;
+        player.pos.x = x0;
+      };
 
-    function playerRotate(dir){
-      const oldMat = player.matrix.map(r => r.slice());
-      const oldX = player.pos.x;
-      rotate(player.matrix, dir);
-      const kicks = dir > 0 ? kickData.CW : kickData.CCW;
-      for(let i=0; i<kicks.length; i++){
-        const [dx,dy] = kicks[i];
-        player.pos.x = oldX + dx;
-        player.pos.y += dy;
-        if(!collide(arena,player)){ player.lastRotate = true; return; }
-      }
-      player.matrix = oldMat;
-      player.pos.x = oldX;
-    }
+      const detectT = () => {
+        const o = player.pos;
+        const corners = [[0,0],[2,0],[0,2],[2,2]];
+        return corners.filter(([cx,cy]) => {
+          const x = o.x+cx, y = o.y+cy;
+          return y<0||x<0||x>=COLS||y>=ROWS||arena[y][x];
+        }).length >= 3;
+      };
 
-    function rotate180(){ playerRotate(1); playerRotate(1); }
-    function holdCurrent(){ if(!canHold) return;
-      if(!holdPieceMatrix){ holdPieceMatrix = player.matrix; playerReset(); }
-      else { [player.matrix, holdPieceMatrix] = [holdPieceMatrix, player.matrix]; player.pos.y = 0;
-        player.pos.x = (COLS/2|0) - (player.matrix[0].length/2|0); }
-      canHold = false;
-    }
+      const hard = () => {
+        while (!collide(arena, player)) player.pos.y++;
+        player.pos.y--;
+        merge(player); sweep(); reset();
+      };
 
-    document.addEventListener('keydown', e => {
-      const key = e.key.toLowerCase();
-      player.lastRotate = false;
-      switch(key){
-        case 'j': if(!inputState.left.held){ inputState.left.held=true; inputState.left.timer=0; inputState.left.arrTimer=0;
-            if(dirState.last === 1) dirState.dcdTimer = DCD;
-            playerMove(-1); dirState.last = -1; } break;
-        case 'l': if(!inputState.right.held){ inputState.right.held=true; inputState.right.timer=0; inputState.right.arrTimer=0;
-            if(dirState.last === -1) dirState.dcdTimer = DCD;
-            playerMove(1); dirState.last = 1; } break;
-        case 'k': inputState.soft.held = true; break;
-        case 'i': playerRotate(1); break;
-        case 'z': playerRotate(-1); break;
-        case 'a': rotate180(); break;
-        case 'shift': holdCurrent(); break;
-        case ' ': hardDrop(); break;
-      }
+      const draw = () => {
+        ctx.fillStyle = '#000'; ctx.fillRect(0,0,canvas.width,canvas.height);
+        // arena
+        arena.forEach((r,y) => r.forEach((v,x) => v && ctx.fillRect(x,y,1,1)));
+        // ghost
+        const g = { pos:{...player.pos}, mat:player.mat.map(r=>r.slice()) };
+        while (!collide(arena,g)) g.pos.y++;
+        g.pos.y--;
+        ctx.globalAlpha = 0.2;
+        g.mat.forEach((r,y) => r.forEach((v,x) => v && ctx.fillRect(x+g.pos.x,y+g.pos.y,1,1)));
+        ctx.globalAlpha = 1;
+        // player
+        player.mat.forEach((r,y) => r.forEach((v,x) => v && ctx.fillRect(x+player.pos.x,y+player.pos.y,1,1)));
+      };
+
+      const move = d => { player.pos.x+=d; if(collide(arena,player)) player.pos.x-=d; };
+
+      const update = t => {
+        const dt = t - lastTime;
+        lastTime = t;
+        // drop
+        const interval = input.soft ? BASE/SDF : BASE;
+        dropCounter += dt;
+        if (dropCounter > interval) {
+          player.pos.y++;
+          if (collide(arena,player)) {
+            player.pos.y--;
+            merge(player);
+            if (player.type==='T' && player.rotLast && detectT()) console.log('T-SPIN!');
+            sweep(); reset();
+          }
+          dropCounter = 0;
+        }
+        // handling
+        if (input.dcd > 0) input.dcd -= dt;
+        ['left','right'].forEach(dir => {
+          if (input[dir]) {
+            input[`t${dir.charAt(0).toUpperCase()+dir.slice(1)}`] += dt;
+            if (input[`t${dir.charAt(0).toUpperCase()+dir.slice(1)}`] > DAS) {
+              input[`t${dir.charAt(0).toUpperCase()+dir.slice(1)}`] = 0;
+              move(dir==='left'? -1:1);
+            }
+          }
+        });
+        draw();
+        requestAnimationFrame(update);
+      };
+
+      // input
+      document.addEventListener('keydown', e => {
+        switch(e.key.toLowerCase()){
+          case 'j': input.left = true; move(-1); input.dcd = input.dir===1?DCD:input.dcd; input.dir=-1; break;
+          case 'l': input.right= true; move(1); input.dcd = input.dir===-1?DCD:input.dcd; input.dir=1; break;
+          case 'k': input.soft = true; break;
+          case 'i': playerRotate(1); break;
+          case 'z': playerRotate(-1); break;
+          case 'a': playerRotate(1); playerRotate(1); break;
+          case 'shift':
+            if(canHold){ [player.mat,hold]=[hold||player.mat,player.mat]; reset(); canHold=false; }
+            break;
+          case ' ': hard(); break;
+        }
+      });
+      document.addEventListener('keyup', e => {
+        if (e.key==='j') input.left=false;
+        if (e.key==='l') input.right=false;
+        if (e.key==='k') input.soft=false;
+      });
+
+      reset(); update();
     });
-    document.addEventListener('keyup', e => {
-      const key = e.key.toLowerCase();
-      if(key === 'j') inputState.left.held = false;
-      if(key === 'l') inputState.right.held = false;
-      if(key === 'k') inputState.soft.held = false;
-    });
-
-    function update(time = 0){
-      const delta = time - lastTime;
-      lastTime = time;
-      const interval = inputState.soft.held ? baseDropInterval / SDF : baseDropInterval;
-      dropCounter += delta;
-      if(dropCounter > interval) playerDrop();
-      processHorizontal(delta);
-      draw();
-      requestAnimationFrame(update);
-    }
-
-    playerReset();
-    update();
-  });
   </script>
 </body>
 </html>
