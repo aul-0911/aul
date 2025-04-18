@@ -1,55 +1,162 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>aul</title>
+  <title>Unlimited Tetris - Full Advanced with Handling</title>
   <style>
-    body {
-      margin: 0;
-      overflow: hidden;
-      height: 100vh;
-      background: radial-gradient(ellipse at center, #0d0d2b 0%, #000000 100%);
-      position: relative;
-    }
-
-    .star {
-      position: absolute;
-      width: 2px;
-      height: 2px;
-      background: white;
-      border-radius: 50%;
-      opacity: 0.8;
-      box-shadow: 0 0 4px 2px rgba(255, 255, 255, 0.3); /* glow 느낌 */
-      animation: twinkle 2s infinite ease-in-out;
-    }
-
-    @keyframes twinkle {
-      0%, 100% { opacity: 0.3; }
-      50% { opacity: 1; }
-    }
+    body { background: #000; color: #fff; font-family: sans-serif; text-align: center; }
+    canvas { background: #111; border: 2px solid white; margin-top: 20px; }
   </style>
 </head>
 <body>
+  <h1>Unlimited Tetris</h1>
+  <canvas id="tetris" width="200" height="400"></canvas>
+  <p>Controls: J = left, L = right, K = soft drop, I = rotate cw, Z = ccw, A = 180°, Shift = Hold, Space = Hard Drop</p>
   <script>
-    const numStars = 250;
+    const canvas = document.getElementById('tetris');
+    const context = canvas.getContext('2d');
+    context.scale(20, 20);
 
-    for (let i = 0; i < numStars; i++) {
-      const star = document.createElement('div');
-      star.className = 'star';
+    // Handling settings (ms)
+    const DAS = 130;    // Delayed Auto Shift delay
+    const ARR = 50;     // Auto Repeat Rate interval
+    const DCD = 50;     // DAS Cut Delay on direction change
+    const SDF = 20;     // Soft Drop Factor (multiplier)
 
-      // 위치 랜덤
-      star.style.top = Math.random() * window.innerHeight + 'px';
-      star.style.left = Math.random() * window.innerWidth + 'px';
+    const COLS = 10, ROWS = 20;
+    const arena = createMatrix(COLS, ROWS);
+    let dropCounter = 0, lastTime = 0;
+    const baseDropInterval = 1000;
 
-      // 크기와 밝기 랜덤
-      const size = 1 + Math.random() * 2;
-      star.style.width = size + 'px';
-      star.style.height = size + 'px';
-      star.style.opacity = 0.5 + Math.random() * 0.5;
-      star.style.animationDuration = (1 + Math.random() * 3) + 's';
+    let holdPieceMatrix = null, canHold = true;
+    const player = { pos:{x:0,y:0}, matrix:null, type:null, lastRotate:false };
 
-      document.body.appendChild(star);
+    // Input state for handling
+    const inputState = {
+      left: { held:false, timer:0, arrTimer:0 },
+      right:{ held:false, timer:0, arrTimer:0 },
+      soft: { held:false }
+    };
+    let dirState = { last:0, dcdTimer:0 };
+
+    const pieces = { 'T':[[0,1,0],[1,1,1],[0,0,0]], 'J':[[2,0,0],[2,2,2],[0,0,0]],
+      'L':[[0,0,3],[3,3,3],[0,0,0]], 'O':[[4,4],[4,4]], 'S':[[0,5,5],[5,5,0],[0,0,0]],
+      'Z':[[6,6,0],[0,6,6],[0,0,0]], 'I':[[0,0,0,0],[7,7,7,7],[0,0,0,0],[0,0,0,0]] };
+
+    const kickData = { 'CW':[[0,0],[-1,0],[-1,1],[0,-2],[-1,-2]], 'CCW':[[0,0],[1,0],[1,1],[0,-2],[1,-2]] };
+
+    function createMatrix(w,h){ const m=[]; while(h--) m.push(new Array(w).fill(0)); return m; }
+    function createPiece(){ const keys = Object.keys(pieces);
+      const type = keys[Math.floor(Math.random()*keys.length)]; player.type=type;
+      return pieces[type].map(r=>r.slice()); }
+
+    function drawMatrix(m,o,ghost=false){ m.forEach((row,y)=> {
+        row.forEach((v,x)=>{ if(v){ context.fillStyle = ghost? 'rgba(255,255,255,0.2)' : '#6cf';
+            context.fillRect(x+o.x,y+o.y,1,1); } });
+      }); }
+    function drawGhost(){ const ghost={pos:{x:player.pos.x,y:player.pos.y}, matrix:JSON.parse(JSON.stringify(player.matrix))};
+      while(!collide(arena,ghost)) ghost.pos.y++; ghost.pos.y--; drawMatrix(ghost.matrix,ghost.pos,true);
     }
+    function draw(){ context.fillStyle='#000'; context.fillRect(0,0,canvas.width,canvas.height);
+      drawMatrix(arena,{x:0,y:0}); drawGhost(); drawMatrix(player.matrix,player.pos);
+    }
+
+    function collide(arena,p){ const [m,o]=[p.matrix,p.pos];
+      for(let y=0;y<m.length;++y) for(let x=0;x<m[y].length;++x)
+        if(m[y][x] && (arena[y+o.y] && arena[y+o.y][x+o.x])) return true;
+      return false;
+    }
+    function merge(arena,p){ p.matrix.forEach((row,y)=> row.forEach((v,x)=> { if(v) arena[p.pos.y+y][p.pos.x+x]=v; })); }
+    function arenaSweep(){ outer: for(let y=ROWS-1;y>=0;--y){ for(let x=0;x<COLS;++x) if(!arena[y][x]) continue outer;
+        const row=arena.splice(y,1)[0].fill(0); arena.unshift(row); y++; }}
+
+    function playerReset(){ player.matrix=createPiece(); player.pos.y=0;
+      player.pos.x=(COLS/2|0)-(player.matrix[0].length/2|0); canHold=true; player.lastRotate=false; }
+
+    function playerDrop(){ player.pos.y++;
+      if(collide(arena,player)){
+        player.pos.y--;
+        const isT = player.type==='T' && player.lastRotate;
+        merge(arena,player);
+        if(isT && detectTSpin()) console.log('T-SPIN!');
+        arenaSweep(); playerReset(); }
+      dropCounter = 0;
+    }
+    function hardDrop(){ while(!collide(arena,player)) player.pos.y++; player.pos.y--; merge(arena,player);
+      arenaSweep(); playerReset(); }
+
+    function detectTSpin(){ const o=player.pos; const corners=[[0,0],[2,0],[0,2],[2,2]];
+      let count=0; corners.forEach(([cx,cy])=>{ const y=o.y+cy, x=o.x+cx;
+        if(y<0||x<0||x>=COLS||y>=ROWS||arena[y][x]) count++; }); return count>=3;
+    }
+
+    function playerMove(dir){ player.pos.x+=dir; if(collide(arena,player)) player.pos.x-=dir; }
+
+    function processHorizontal(delta){ ['left','right'].forEach(side=>{
+        const st=inputState[side]; const dir = side==='left'?-1:1;
+        if(st.held && dirState.dcdTimer<=0){
+          st.timer += delta;
+          if(st.timer > DAS){
+            st.arrTimer += delta;
+            if(st.arrTimer > ARR){ playerMove(dir);
+              st.arrTimer -= ARR; }
+          }
+        }
+      });
+      if(dirState.dcdTimer>0) dirState.dcdTimer -= delta;
+    }
+
+    function rotate(m,dir){ for(let y=0;y<m.length;++y) for(let x=0;x<y;++x)
+        [m[x][y],m[y][x]]=[m[y][x],m[x][y]];
+      if(dir>0) m.forEach(r=>r.reverse()); else m.reverse(); }
+    function playerRotate(dir){ const oldMat=player.matrix.map(r=>r.slice()); const oldX=player.pos.x;
+      rotate(player.matrix,dir);
+      const kicks = dir>0? kickData.CW : kickData.CCW;
+      for(let i=0;i<kicks.length;i++){ const [dx,dy]=kicks[i]; player.pos.x=oldX+dx; player.pos.y+=dy;
+        if(!collide(arena,player)){ player.lastRotate=true; return; }}
+      player.matrix=oldMat; player.pos.x=oldX;
+    }
+    function rotate180(){ playerRotate(1); playerRotate(1); }
+    function holdCurrent(){ if(!canHold) return; if(!holdPieceMatrix){ holdPieceMatrix=player.matrix; playerReset(); }
+      else {[player.matrix,holdPieceMatrix]=[holdPieceMatrix,player.matrix]; player.pos.y=0;
+        player.pos.x=(COLS/2|0)-(player.matrix[0].length/2|0);} canHold=false;
+    }
+
+    document.addEventListener('keydown',e=>{
+      const key=e.key.toLowerCase(); player.lastRotate=false;
+      switch(key){
+        case 'j': if(!inputState.left.held){ inputState.left.held=true; inputState.left.timer=0;
+            inputState.left.arrTimer=0; if(dirState.last===1) dirState.dcdTimer=DCD;
+            playerMove(-1); dirState.last=-1;} break;
+        case 'l': if(!inputState.right.held){ inputState.right.held=true;
+            inputState.right.timer=0; inputState.right.arrTimer=0;
+            if(dirState.last===-1) dirState.dcdTimer=DCD;
+            playerMove(1); dirState.last=1;} break;
+        case 'k': inputState.soft.held=true; break;
+        case 'i': playerRotate(1); break;
+        case 'z': playerRotate(-1); break;
+        case 'a': rotate180(); break;
+        case 'shift': holdCurrent(); break;
+        case ' ': hardDrop(); break;
+      }
+    });
+    document.addEventListener('keyup',e=>{
+      const key=e.key.toLowerCase();
+      if(key==='j') inputState.left.held=false;
+      if(key==='l') inputState.right.held=false;
+      if(key==='k') inputState.soft.held=false;
+    });
+
+    function update(time=0){ const delta = time - lastTime; lastTime = time;
+      // soft drop affects interval
+      const interval = inputState.soft.held? baseDropInterval/SDF : baseDropInterval;
+      dropCounter += delta;
+      if(dropCounter > interval) playerDrop();
+      processHorizontal(delta);
+      draw(); requestAnimationFrame(update);
+    }
+
+    playerReset(); update();
   </script>
 </body>
 </html>
